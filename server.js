@@ -1,116 +1,144 @@
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const mysql = require('mysql2/promise');
 const db = require('./db');
 const bcrypt = require('bcryptjs');
 
-const pool = mysql.createPool({
-  host: 'localhost',
-  user: 'your_mysql_username',
-  password: 'your_mysql_password',
-  database: 'bubble',
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-});
-
-module.exports = pool;
-
 const app = express();
 app.use(cors());
+app.use(express.json());
 
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: {
-    origin: '*',
-  },
+  cors: { origin: '*' },
 });
 
-// Store reminders in memory (later you can upgrade to database if needed)
+// In-memory storage for reminders
 const reminders = {};
 
+// Send bot message with typing indicator
 const sendBotMessage = (text) => {
-  const now = new Date().toISOString();
-  io.emit('receive_message', { text, sender: 'bot', timestamp: now });
+  io.emit('typing', { sender: 'bot' });
+
+  setTimeout(() => {
+    io.emit('receive_message', {
+      text,
+      sender: 'bot',
+      timestamp: new Date().toISOString(),
+    });
+  }, 1200);
 };
 
+// Smarter simpleBotReplies function
 const simpleBotReplies = (text, socketId) => {
   const lowered = text.toLowerCase();
-  const now = new Date().toISOString();
+  const words = lowered
+    .split(/\s+|[,!.?]+/) // split on spaces, commas, dots, exclamation marks
+    .filter(Boolean); // remove empty strings
 
-  if (lowered.includes('hello') || lowered.includes('hi') || lowered.includes('hey')) {
-    sendBotMessage(`Hey there! 👋 How can I help you today?`);
-  }
+  const triggers = [
+    {
+      keywords: ['hello', 'hi', 'hey', 'yo', 'greetings', 'sup', 'what\'s up'],
+      reply: "Hey there! 👋 How can I help you today?",
+    },
+    {
+      keywords: ['how', 'are', 'you'],
+      requireAll: true,
+      reply: "I'm doing great! Thanks for asking. How about you?",
+    },
+    {
+      keywords: ['tired', 'exhausted', 'sleepy', 'bored', 'fatigued'],
+      reply: "Don't push yourself too hard. 💤 Make sure to get some rest!",
+    },
+    {
+      keywords: ['happy', 'good', 'day', 'great', 'awesome', 'fantastic', 'wonderful', 'cheerful'],
+      reply: "That's awesome! 🌞 Keep spreading positivity.",
+    },
+    {
+      keywords: ['sad', 'depressed', 'unhappy', 'down', 'blue'],
+      reply: "I'm here for you. Remember, even the darkest nights end in sunrise. 🌅",
+    },
+    {
+      keywords: ['remind', 'me'],
+      special: 'reminder',
+    },
+    {
+      keywords: ['joke'],
+      reply: [
+        "Why don't skeletons fight each other? They don't have the guts! 💀",
+        "What do you call fake spaghetti? An impasta! 🍝",
+        "Why was the math book sad? It had too many problems. 📖",
+      ],
+      random: true,
+    },
+    {
+      keywords: ['advice'],
+      reply: "Trust yourself. You've survived a lot, and you'll survive whatever is coming. 💬",
+    },
+    {
+      keywords: ['thank'],
+      reply: "You're welcome! 😊 I'm always here to help.",
+    },
+    {
+      keywords: ['who', 'are', 'you'],
+      requireAll: true,
+      reply: "I'm Sylvester 🐾 — your friendly assistant!",
+    },
+  ];
 
-  if (lowered.includes('how are you')) {
-    sendBotMessage(`I'm doing great! Thanks for asking. How about you?`);
-  }
+  for (const trigger of triggers) {
+    if (trigger.special === 'reminder') {
+      if (lowered.includes('remind me')) {
+        const match = lowered.match(/remind me to (.+?) at (\d+:\d+)/i);
+        if (match) {
+          const task = match[1];
+          const time = match[2];
 
-  if (lowered.includes('tired') || lowered.includes('exhausted') || lowered.includes('sleepy')) {
-    sendBotMessage(`Don't push yourself too hard. 💤 Make sure to get some rest!`);
-  }
+          if (!reminders[socketId]) {
+            reminders[socketId] = [];
+          }
 
-  if (lowered.includes('happy') || lowered.includes('good day')) {
-    sendBotMessage(`That's awesome! 🌞 Keep spreading positivity.`);
-  }
-
-  if (lowered.includes('sad') || lowered.includes('depressed') || lowered.includes('unhappy')) {
-    sendBotMessage(`I'm here for you. Remember, even the darkest nights end in sunrise. 🌅`);
-  }
-
-  if (lowered.includes('remind me')) {
-    const reminderMatch = text.match(/remind me to (.+?) at (\d+:\d+)/i);
-    if (reminderMatch) {
-      const task = reminderMatch[1];
-      const time = reminderMatch[2];
-
-      if (!reminders[socketId]) {
-        reminders[socketId] = [];
+          reminders[socketId].push({ task, time });
+          return sendBotMessage(`Got it! I'll remind you to "${task}" at ${time}. 📝`);
+        } else {
+          return sendBotMessage(`Please format your reminder like "Remind me to [task] at [HH:MM]". ⏰`);
+        }
       }
+    }
 
-      reminders[socketId].push({ task, time });
-      sendBotMessage(`Got it! I'll remind you to "${task}" at ${time}. 📝`);
+    if (trigger.requireAll) {
+      const allMatch = trigger.keywords.every((word) => words.includes(word));
+      if (allMatch) {
+        return sendBotMessage(trigger.reply);
+      }
     } else {
-      sendBotMessage(`Please format your reminder like "Remind me to [task] at [HH:MM]". ⏰`);
+      const anyMatch = trigger.keywords.some((word) => words.includes(word));
+      if (anyMatch) {
+        if (trigger.random) {
+          const randomReply = trigger.reply[Math.floor(Math.random() * trigger.reply.length)];
+          return sendBotMessage(randomReply);
+        }
+        return sendBotMessage(trigger.reply);
+      }
     }
   }
-
-  if (lowered.includes('joke')) {
-    const jokes = [
-      "Why don't skeletons fight each other? They don't have the guts! 💀",
-      "What do you call fake spaghetti? An impasta! 🍝",
-      "Why was the math book sad? It had too many problems. 📖",
-    ];
-    const joke = jokes[Math.floor(Math.random() * jokes.length)];
-    sendBotMessage(joke);
-  }
-
-  if (lowered.includes('advice')) {
-    sendBotMessage(`Trust yourself. You've survived a lot, and you'll survive whatever is coming. 💬`);
-  }
-
-  if (lowered.includes('thank')) {
-    sendBotMessage(`You're welcome! 😊 I'm always here to help.`);
-  }
-
-  if (lowered.includes('who are you')) {
-    sendBotMessage(`I'm Sylvester 🐾 — your friendly assistant!`);
-  }
-
 };
 
+// Socket handling
 io.on('connection', (socket) => {
   console.log('A user connected: ', socket.id);
 
   socket.on('send_message', (data) => {
     console.log('Message received:', data);
 
-    // Always echo back the user message
-    io.emit('receive_message', { text: data.text, sender: 'user', timestamp: new Date().toISOString() });
+    io.emit('receive_message', {
+      text: data.text,
+      sender: data.sender,
+      timestamp: new Date().toISOString(),
+    });
 
-    // Bot logic based on the message content
     simpleBotReplies(data.text, socket.id);
   });
 
@@ -120,7 +148,7 @@ io.on('connection', (socket) => {
   });
 });
 
-// Scheduled task to check for reminders (simple approach)
+// Reminder checking every minute
 setInterval(() => {
   const now = new Date();
   const currentTime = now.getHours().toString().padStart(2, '0') + ':' + now.getMinutes().toString().padStart(2, '0');
@@ -129,42 +157,20 @@ setInterval(() => {
     reminders[socketId] = reminders[socketId].filter((reminder) => {
       if (reminder.time === currentTime) {
         sendBotMessage(`Reminder: ${reminder.task}`);
-        return false; // Remove after sending
+        return false;
       }
-      return true; // Keep it
+      return true;
     });
   }
-}, 60000); // check every 1 min
+}, 60000);
 
+// Basic Express routes
 app.get('/', (req, res) => {
   res.send('Bubble server is running! 🫧');
 });
 
-// Register a new user
-app.post('/register', express.json(), async (req, res) => {
-  const { username, password } = req.body;
-
-  if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
-
-  try {
-    const [existingUser] = await db.query('SELECT id FROM users WHERE username = ?', [username]);
-    if (existingUser.length > 0) {
-      return res.status(400).json({ error: 'Username already taken' });
-    }
-
-    const passwordHash = await bcrypt.hash(password, 10);
-
-    await db.query('INSERT INTO users (username, password_hash) VALUES (?, ?)', [username, passwordHash]);
-
-    res.json({ success: true, message: 'User registered successfully' });
-  } catch (err) {
-    console.error('Register error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Login a user
-app.post('/login', express.json(), async (req, res) => {
+// Login endpoint
+app.post('/login', async (req, res) => {
   const { username, password } = req.body;
 
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
@@ -173,25 +179,20 @@ app.post('/login', express.json(), async (req, res) => {
     const [users] = await db.query('SELECT * FROM users WHERE username = ?', [username]);
     const user = users[0];
 
-    if (!user) {
-      return res.status(401).json({ error: 'Invalid username or password' });
-    }
+    if (!user) return res.status(401).json({ error: 'Invalid username or password' });
 
     const isMatch = await bcrypt.compare(password, user.password_hash);
 
-    if (!isMatch) {
-      return res.status(401).json({ error: 'Invalid username or password' });
-    }
+    if (!isMatch) return res.status(401).json({ error: 'Invalid username or password' });
 
-    // For now, just send basic success (later you can attach sessions)
     res.json({ success: true, user: { id: user.id, username: user.username, avatar_url: user.avatar_url } });
-
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
+// Server listen
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
